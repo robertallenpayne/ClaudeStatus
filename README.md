@@ -4,6 +4,10 @@ A tiny always-on-top macOS widget that shows live **Claude Code** and **Anthropi
 
 It reads the data the Claude Code statusline hook writes to `~/.claude/statusline-data.json` and refreshes every 30 seconds.
 
+<p align="center">
+  <img src="docs/screenshot.png" alt="Claude Status widget showing model, context window, and rate-limit usage" width="360">
+</p>
+
 ## Features
 
 - **Context window** usage with a color-coded bar (green → yellow → red).
@@ -57,3 +61,7 @@ The API key (if set via the widget) and window geometry are stored in `~/.claude
 - macOS (Apple Silicon)
 - Python 3.12
 - `customtkinter`, `pillow`, `py2app` (installed automatically by `build.sh`)
+
+## License
+
+[MIT](LICENSE) © Robert Allen Payne — free to use, modify, and redistribute; please keep the copyright notice for attribution.
