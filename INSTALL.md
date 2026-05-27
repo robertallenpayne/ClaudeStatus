@@ -63,6 +63,6 @@ The widget reads `~/.claude/statusline-data.json`, written by the Claude Code st
 
 ## Notes
 
-- The app has `LSUIElement = True` in its plist, so it does not appear in the Dock while running — only as an always-on-top floating window.
-- Window position is saved to `~/.claude/status-widget.json` on close and restored on next launch.
+- The app has `LSUIElement = True` in its plist, so it doesn't appear in the Dock while running. In **full-card** mode it behaves like a normal window; in **strip** mode it's a borderless, always-on-top HUD that reveals when you push the cursor into the top-right corner of the screen. Quit it from the `⋮` menu.
+- The full card's window position (and your chosen mode) is saved to `~/.claude/status-widget.json` and restored on next launch. The strip auto-positions at the top-right corner.
 - The API key (if set via the widget's "Set API Key" button) is also stored in `~/.claude/status-widget.json`.
