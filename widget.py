@@ -3,7 +3,6 @@
 
 import json
 import os
-import re
 import subprocess
 import tkinter as tk
 from datetime import datetime
@@ -14,6 +13,15 @@ CACHE_FILE  = os.path.expanduser("~/.claude/statusline-data.json")
 CONFIG_FILE = os.path.expanduser("~/.claude/status-widget.json")
 BILLING_URL = "https://console.anthropic.com/settings/billing"
 REFRESH_MS  = 30_000
+
+# Hot-corner HUD behavior
+POLL_MS       = 120     # how often the watcher samples the cursor position
+HIDE_GRACE_MS = 400     # keep the HUD up this long after the cursor leaves it
+PEEK_MS       = 2500    # show on launch this long so it's clear the app is running
+MENU_PIN_MS   = 2500    # keep the HUD pinned this long after a menu opens
+HOT_ZONE      = 6       # size of the top-right trigger square, in px
+MENUBAR_H     = 28      # tuck the HUD this far below the top edge (under the menu bar)
+EDGE_MARGIN   = 6       # gap from the right screen edge
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -64,56 +72,160 @@ class Widget(ctk.CTk):
         self._compact = self._cfg.get("compact", False)
 
         self.title("Claude Status")
-        self.resizable(True, True)
-        self.attributes("-topmost", True)
         self.configure(fg_color=BG)
 
-        self._restore_geometry()
         self._job = None
+        self._watch_job = None
+        self._visible = False
+        self._peeking = False           # forces the HUD to stay up during the launch peek
+        self._pin = 0                   # >0 keeps the HUD up while a menu/dialog is open
+        self._leave_count = 0
+        self._grace_ticks = max(1, HIDE_GRACE_MS // POLL_MS)
+
         self._build()
         self._refresh()
+        self.update_idletasks()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    def _geo_key(self):
-        return "geometry_compact" if self._compact else "geometry"
+        self._enter_mode()
 
     def _mode_sizes(self):
         if self._compact:
             return COMPACT_DEFAULT, COMPACT_MIN
         return FULL_DEFAULT, FULL_MIN
 
-    def _default_geometry(self):
-        (w, h), _ = self._mode_sizes()
+    def _layout_window(self):
+        """Size the window for the current mode and place it: tucked under the
+        top-right corner in strip mode, or at its remembered/default spot as a
+        normal window in full-card mode."""
+        (w, h), (minw, minh) = self._mode_sizes()
+        self.minsize(minw, minh)
         sw = self.winfo_screenwidth()
-        return f"{w}x{h}+{sw - w - 20}+20"
+        if self._compact:
+            self.geometry(f"{w}x{h}+{sw - w - EDGE_MARGIN}+{MENUBAR_H}")
+        elif geo := self._cfg.get("geometry"):
+            self.geometry(geo)
+        else:
+            self.geometry(f"{w}x{h}+{sw - w - 40}+60")
 
-    @staticmethod
-    def _sanitize_geometry(geo, minw, minh):
-        """Return a valid 'WxH+X+Y' string with size clamped up to the
-        minimum, or None if the saved value is missing/unparseable."""
-        if not geo:
-            return None
-        m = re.match(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)$", geo.strip())
-        if not m:
-            return None
-        w, h, x, y = int(m[1]), int(m[2]), m[3], m[4]
-        return f"{max(w, minw)}x{max(h, minh)}{x}{y}"
+    # ── Window mode ─────────────────────────────────────────────────────────────
 
-    def _restore_geometry(self):
-        _, (minw, minh) = self._mode_sizes()
-        self.minsize(minw, minh)          # set before geometry so it can shrink between modes
-        geo = self._sanitize_geometry(self._cfg.get(self._geo_key()), minw, minh)
-        self.geometry(geo or self._default_geometry())
+    def _enter_mode(self):
+        """Apply the window chrome, placement, and watcher for the current mode.
+        Strip mode is a borderless, always-on-top hot-corner HUD; full-card mode
+        is an ordinary draggable window."""
+        self._stop_watch()
+        self.withdraw()                 # re-map cleanly so overrideredirect redraws
+
+        if self._compact:
+            self.resizable(False, False)
+            self.overrideredirect(True)
+            self.attributes("-topmost", True)
+            self._layout_window()
+            # Peek on launch/switch so it's clear it's there, then watch the corner.
+            self._visible = False
+            self._peeking = True
+            self._show()
+            self.after(PEEK_MS, self._end_peek)
+            self._start_watch()
+        else:
+            self.overrideredirect(False)
+            self.attributes("-topmost", False)
+            self.resizable(True, True)
+            self._layout_window()
+            self.deiconify()
+            self.lift()
+            self._visible = True
+
+    def _save_geometry_if_full(self):
+        if not self._compact:
+            self._cfg["geometry"] = self.geometry()
+
+    # ── Show / hide (hot corner, strip mode only) ────────────────────────────────
+
+    def _in_hot_corner(self, px, py):
+        return px >= self.winfo_screenwidth() - HOT_ZONE and py <= HOT_ZONE
+
+    def _pointer_over_window(self, px, py):
+        x, y = self.winfo_rootx(), self.winfo_rooty()
+        return x <= px <= x + self.winfo_width() and y <= py <= y + self.winfo_height()
+
+    def _should_stay(self, px, py):
+        """True while anything wants the HUD to remain visible."""
+        return (self._peeking or self._pin > 0
+                or self._in_hot_corner(px, py)
+                or self._pointer_over_window(px, py))
+
+    def _show(self):
+        self._layout_window()
+        self.deiconify()
+        self.lift()
+        self.attributes("-topmost", True)
+        self._visible = True
+        self._leave_count = 0
+        self._refresh()
+
+    def _hide(self):
+        self.withdraw()
+        self._visible = False
+
+    def _start_watch(self):
+        if self._watch_job is None:
+            self._watch_corner()
+
+    def _stop_watch(self):
+        if self._watch_job is not None:
+            self.after_cancel(self._watch_job)
+            self._watch_job = None
+
+    def _watch_corner(self):
+        if not self._compact:           # full-card mode never auto-hides
+            self._watch_job = None
+            return
+        try:
+            px, py = self.winfo_pointerxy()
+        except tk.TclError:
+            self._watch_job = None
+            return
+        if self._visible:
+            if self._should_stay(px, py):
+                self._leave_count = 0
+            else:
+                self._leave_count += 1
+                if self._leave_count >= self._grace_ticks:
+                    self._hide()
+        elif self._in_hot_corner(px, py):
+            self._show()
+        self._watch_job = self.after(POLL_MS, self._watch_corner)
+
+    def _end_peek(self):
+        self._peeking = False
+        px, py = self.winfo_pointerxy()
+        if self._compact and self._visible and not self._should_stay(px, py):
+            self._hide()
+
+    def _pin_for(self, ms):
+        """Pin the HUD open for a stretch (used while menus are posted)."""
+        self._pin += 1
+        self.after(ms, self._unpin)
+
+    def _unpin(self):
+        self._pin = max(0, self._pin - 1)
 
     def _on_close(self):
-        self._cfg[self._geo_key()] = self.geometry()
+        self._save_geometry_if_full()
+        for job in (self._job, self._watch_job):
+            if job:
+                self.after_cancel(job)
         _save_config(self._cfg)
         self.destroy()
+
+    def _quit(self):
+        self._on_close()
 
     # ── Toggle ────────────────────────────────────────────────────────────────
 
     def _toggle_mode(self):
-        self._cfg[self._geo_key()] = self.geometry()
+        self._save_geometry_if_full()   # remember where the full card was sitting
         self._compact = not self._compact
         self._cfg["compact"] = self._compact
         _save_config(self._cfg)
@@ -121,9 +233,8 @@ class Widget(ctk.CTk):
         for w in self.winfo_children():
             w.destroy()
 
-        self._restore_geometry()
         self._build()
-        self._refresh()
+        self._enter_mode()
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -153,6 +264,12 @@ class Widget(ctk.CTk):
                       fg_color="transparent", hover_color="#1a2d3e",
                       text_color=MUTED, font=("SF Pro", 13),
                       command=self._toggle_mode).pack(side="right", padx=0)
+
+        self._menu_btn = ctk.CTkButton(hdr, text="⋮", width=28, height=24,
+                                        fg_color="transparent", hover_color="#1a2d3e",
+                                        text_color=MUTED, font=("SF Pro", 14),
+                                        command=self._show_menu)
+        self._menu_btn.pack(side="right", padx=0)
 
         # Claude Code card
         cc = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10)
@@ -287,20 +404,31 @@ class Widget(ctk.CTk):
     # ── Menu (compact mode) ───────────────────────────────────────────────────
 
     def _show_menu(self):
+        # Keep the HUD up while the menu is posted, even if the cursor wanders
+        # onto the (separate) menu window.
+        self._pin_for(MENU_PIN_MS)
+
         menu = tk.Menu(self, tearoff=0,
                        bg="#1e1e3a", fg="#818cf8",
                        activebackground="#2d2d52", activeforeground="#c4b5fd",
                        font=("SF Pro", 11), bd=0)
-        menu.add_command(label="Expand to full card", command=self._toggle_mode)
+        menu.add_command(
+            label="Expand to full card" if self._compact else "Collapse to strip",
+            command=self._toggle_mode)
         menu.add_separator()
         menu.add_command(label="Set API Key", command=self._set_api_key)
         menu.add_command(label="Billing ↗",
                          command=lambda: subprocess.run(["open", BILLING_URL]))
+        menu.add_separator()
+        menu.add_command(label="Quit Claude Status", command=self._quit)
 
         btn = self._menu_btn
         x = btn.winfo_rootx()
         y = btn.winfo_rooty() + btn.winfo_height() + 2
-        menu.post(x, y)
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
 
     # ── Data ──────────────────────────────────────────────────────────────────
 
@@ -396,11 +524,18 @@ class Widget(ctk.CTk):
         lbl.configure(text=f"{int(round(pct))}%", text_color=color)
 
     def _set_api_key(self):
-        dialog = ctk.CTkInputDialog(
-            text="Paste your Anthropic API key\n(saved locally to ~/.claude/status-widget.json):",
-            title="Set API Key",
-        )
-        key = dialog.get_input()
+        # Keep the HUD up and drop topmost so the dialog isn't hidden behind it.
+        self._pin += 1
+        self.attributes("-topmost", False)
+        try:
+            dialog = ctk.CTkInputDialog(
+                text="Paste your Anthropic API key\n(saved locally to ~/.claude/status-widget.json):",
+                title="Set API Key",
+            )
+            key = dialog.get_input()
+        finally:
+            self.attributes("-topmost", True)
+            self._pin -= 1
         if key and key.strip():
             self._cfg["api_key"] = key.strip()
             _save_config(self._cfg)

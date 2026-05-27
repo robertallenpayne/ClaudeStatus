@@ -1,6 +1,6 @@
 # Claude Status
 
-A tiny always-on-top macOS widget that shows live **Claude Code** and **Anthropic API** status at a glance — model, context-window usage, rate limits, and reset times — in a dark, compact floating window.
+A tiny macOS widget that shows live **Claude Code** and **Anthropic API** status at a glance — model, context-window usage, rate limits, and reset times — in a dark UI. Use it as an ordinary window, or as a borderless strip that drops down from the top-right corner of the screen when you reach for it and slips away when you don't.
 
 It reads the data the Claude Code statusline hook writes to `~/.claude/statusline-data.json` and refreshes every 30 seconds.
 
@@ -14,7 +14,10 @@ It reads the data the Claude Code statusline hook writes to `~/.claude/statuslin
 - **5-hour** and **7-day** rate-limit usage, plus the next reset time.
 - Current **model** and working directory.
 - **Anthropic API** key indicator with quick links to set a key and open the billing console.
-- **Two layouts** — a full card and a one-line compact strip — toggled with a button (or the `⋮` menu in compact mode). Window position and chosen layout persist between launches.
+- **Two modes**, toggled with the `⊟`/`⊞` button or the `⋮` menu:
+  - **Full card** — a normal, draggable window that remembers where you left it.
+  - **Strip** — a borderless heads-up strip with no title bar, pinned to the top-right corner. Shove your cursor into the corner to reveal it; move away and it hides. Quit from the `⋮` menu.
+  - Your chosen mode is remembered between launches.
 
 ## Install
 
@@ -35,6 +38,8 @@ Then launch from Spotlight or Finder. See [`INSTALL.md`](INSTALL.md) for login-i
 ```
 
 This creates/updates the `.venv`, regenerates the icon, builds `dist/Claude Status.app` with `py2app`, and ad-hoc signs it (no Apple Developer account required). Requires Python 3.12 and `xz` (`brew install xz`) for the bundled `liblzma`.
+
+> **Tip:** keep the repository itself outside iCloud Drive (e.g. in `~/Developer`). When the project lives in an iCloud-synced folder like `~/Documents`, iCloud re-stamps extended attributes on the freshly built bundle and invalidates its code signature. `build.sh` signs in a temp dir to work around this, but building from a non-synced location avoids the churn entirely.
 
 ### Run without bundling
 
